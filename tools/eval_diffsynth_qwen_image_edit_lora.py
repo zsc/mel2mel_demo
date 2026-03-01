@@ -108,6 +108,19 @@ def main() -> int:
         choices=(0, 1),
         help="Use DiffSynth VRAM management (recommended if training is running on the same GPU).",
     )
+    parser.add_argument(
+        "--vram_limit_gb",
+        type=float,
+        default=0.0,
+        help="If >0, limit DiffSynth VRAM preloading/caching to this many GiB (helps avoid OOM when training holds most VRAM).",
+    )
+    parser.add_argument(
+        "--computation_dtype",
+        type=str,
+        default="bf16",
+        choices=("bf16", "fp16", "fp8"),
+        help="DType for VRAM-managed model compute. Use fp8 to reduce eval VRAM.",
+    )
     parser.add_argument("--compute_fid", type=int, default=1, choices=(0, 1), help="Compute FID on generated preds.")
     parser.add_argument("--fid_device", type=str, default="cuda", help="Device for Inception FID feature extraction.")
     parser.add_argument("--fid_batch_size", type=int, default=32, help="Batch size for Inception feature extraction.")
@@ -145,6 +158,14 @@ def main() -> int:
     rows = rows[: args.num_samples]
 
     float8 = getattr(torch, "float8_e4m3fn", torch.float16)
+    if args.computation_dtype == "bf16":
+        computation_dtype = torch.bfloat16
+    elif args.computation_dtype == "fp16":
+        computation_dtype = torch.float16
+    else:
+        computation_dtype = getattr(torch, "float8_e4m3fn", None)
+        if computation_dtype is None:
+            raise SystemExit("torch has no float8 support; cannot use --computation_dtype fp8")
     vram_config = None
     if args.low_vram:
         vram_config = {
@@ -154,9 +175,10 @@ def main() -> int:
             "onload_device": "cpu",
             "preparing_dtype": float8,
             "preparing_device": "cuda",
-            "computation_dtype": torch.bfloat16,
+            "computation_dtype": computation_dtype,
             "computation_device": "cuda",
         }
+    vram_limit = float(args.vram_limit_gb) if args.low_vram and args.vram_limit_gb and args.vram_limit_gb > 0 else None
 
     pipe = QwenImagePipeline.from_pretrained(
         torch_dtype=torch.bfloat16,
@@ -179,6 +201,7 @@ def main() -> int:
             ),
         ],
         processor_config=ModelConfig("/.autodl-model/data/Qwen/Qwen-Image-Edit-2511/processor"),
+        vram_limit=vram_limit,
     )
     pipe.load_lora(pipe.dit, str(args.lora))
 
