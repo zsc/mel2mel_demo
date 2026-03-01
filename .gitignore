@@ -1,72 +1,15 @@
-# Python
-*.tar.gz
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-.venv/
-ENV/
-env/
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS files
 .DS_Store
-Thumbs.db
 
-# Project specific
-# Data files (large binary files)
-data/*
-!data/.gitkeep
+# Common local outputs
+out_dataset/
+out_dataset_*/
+infer_out/
+runs/
 
-# Output files
-outputs/
-results/
-checkpoints/
-*.pth
-*.pt
-*.ckpt
-*.safetensors
-
-# Audio files
-*.wav
-*.mp3
-*.flac
-*.ogg
-
-# Image files (generated mel spectrograms)
-*.png
-*.jpg
-*.jpeg
-
-# Logs
-*.log
-logs/
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-*.ipynb
+# Common local archives/artifacts
+*.tar.gz
