@@ -38,21 +38,31 @@ import whisper  # noqa: E402
 @dataclass(frozen=True)
 class Sample:
     tar_member_name: str
+    relpath: str
     eval_tag: str
     utt_id: str
     kind: str  # pred / target / control_to_target
 
 
 def parse_member_name(name: str) -> Sample:
-    p = Path(name)
+    norm_name = name
+    while norm_name.startswith("./"):
+        norm_name = norm_name[2:]
+    norm_name = norm_name.lstrip("/")
+
+    p = Path(norm_name)
     if p.suffix.lower() != ".png":
-        raise ValueError(f"expected .png, got {name!r}")
-    if len(p.parts) < 3:
-        raise ValueError(f"unexpected member path: {name!r}")
-    utt_id = p.parts[-2]
+        raise ValueError(f"expected .png, got {norm_name!r}")
+    if len(p.parts) < 2:
+        raise ValueError(f"unexpected member path: {norm_name!r}")
+    if len(p.parts) >= 3:
+        eval_tag = p.parts[-3]
+        utt_id = p.parts[-2]
+    else:
+        eval_tag = ""
+        utt_id = p.parts[-2]
     kind = p.stem
-    eval_tag = p.parts[-3]
-    return Sample(tar_member_name=name, eval_tag=eval_tag, utt_id=utt_id, kind=kind)
+    return Sample(tar_member_name=name, relpath=norm_name, eval_tag=eval_tag, utt_id=utt_id, kind=kind)
 
 
 def magma_lut_u8() -> tuple[np.ndarray, dict[tuple[int, int, int], int]]:
@@ -197,7 +207,13 @@ def pick_device(device_arg: str | None) -> str:
     return "cpu"
 
 
-def iter_png_members(samples_tar: Path, *, pattern: str | None) -> list[Sample]:
+def iter_png_members(
+    samples_tar: Path,
+    *,
+    pattern: str | None,
+    eval_tag_override: str | None,
+    allowed_kinds: set[str] | None,
+) -> list[Sample]:
     items: list[Sample] = []
     with tarfile.open(samples_tar, "r:*") as tf:
         for m in tf.getmembers():
@@ -205,8 +221,22 @@ def iter_png_members(samples_tar: Path, *, pattern: str | None) -> list[Sample]:
                 continue
             if pattern is not None and not fnmatch(m.name, pattern):
                 continue
-            items.append(parse_member_name(m.name))
-    items.sort(key=lambda s: (s.eval_tag, s.utt_id, s.kind, s.tar_member_name))
+            try:
+                s = parse_member_name(m.name)
+            except ValueError:
+                continue
+            if eval_tag_override is not None:
+                s = Sample(
+                    tar_member_name=s.tar_member_name,
+                    relpath=s.relpath,
+                    eval_tag=eval_tag_override,
+                    utt_id=s.utt_id,
+                    kind=s.kind,
+                )
+            if allowed_kinds is not None and s.kind not in allowed_kinds:
+                continue
+            items.append(s)
+    items.sort(key=lambda s: (s.eval_tag, s.utt_id, s.kind, s.relpath))
     return items
 
 
@@ -222,7 +252,9 @@ def write_report_html(out_dir: Path, results: list[dict]) -> Path:
         by_eval.setdefault(r["eval_tag"], {}).setdefault(r["utt_id"], {})[r["kind"]] = r
 
     eval_tags = sorted(by_eval.keys())
-    kinds = ["target", "control_to_target", "pred"]
+    kind_set = {r["kind"] for r in results}
+    preferred = ["control", "target", "control_to_target", "pred"]
+    kinds = [k for k in preferred if k in kind_set] + sorted(kind_set - set(preferred))
 
     def rel(p: str) -> str:
         try:
@@ -330,7 +362,13 @@ summary { cursor: pointer; font-weight: 600; }
 
         for utt_id in sorted(by_eval[eval_tag].keys()):
             row = by_eval[eval_tag][utt_id]
-            ref = row.get("target", row.get("pred", row.get("control_to_target", {}))).get("ref", "")
+            ref = ""
+            for k in preferred:
+                if k in row and "ref" in row[k]:
+                    ref = row[k]["ref"]
+                    break
+            if not ref and row:
+                ref = next(iter(row.values())).get("ref", "")
             parts.append("<tr>")
             parts.append(f"<td><code>{html_escape(utt_id)}</code></td>")
             parts.append(f"<td class='ref'>{html_escape(ref)}</td>")
@@ -346,8 +384,8 @@ summary { cursor: pointer; font-weight: 600; }
                 badge_cls = cer_badge(v)
                 parts.append("<td class='cell'>")
                 if png_rel:
-                    parts.append(f"<img class='img' src='{html_escape(png_rel)}'/>")
-                parts.append(f"<audio class='audio' controls src='{html_escape(wav_rel)}'></audio>")
+                    parts.append(f"<img class='img' loading='lazy' src='{html_escape(png_rel)}'/>")
+                parts.append(f"<audio class='audio' controls preload='none' src='{html_escape(wav_rel)}'></audio>")
                 parts.append(f"<div class='hyp'><span class='{badge_cls} cer'>CER={v:.3f}</span></div>")
                 parts.append(f"<div class='hyp'>{html_escape(hyp)}</div>")
                 parts.append("</td>")
@@ -373,6 +411,13 @@ def main() -> int:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/ningguang_eval"), help="Where to write wavs and transcripts.")
     parser.add_argument("--pattern", type=str, default=None, help="Optional fnmatch pattern on tar member name (e.g. '*/*/target.png').")
+    parser.add_argument("--eval-tag", type=str, default=None, help="Override eval_tag for all samples (useful when tar has no eval subdir).")
+    parser.add_argument(
+        "--kinds",
+        type=str,
+        default=None,
+        help="Comma-separated kinds to process (e.g. 'target,pred,control_to_target'). Default: all kinds in the tar.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Only process first N (after sorting).")
     parser.add_argument("--assume-magma", action="store_true", help="Assume PNGs are magma-colormap renders and invert them.")
     parser.add_argument("--min-db", type=float, default=-11.0, help="Log-mel min for de-normalization.")
@@ -395,7 +440,19 @@ def main() -> int:
     out_dir: Path = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    samples = iter_png_members(args.samples_tar, pattern=args.pattern)
+    allowed_kinds = None
+    if args.kinds is not None:
+        kinds = {k.strip() for k in args.kinds.split(",") if k.strip()}
+        if not kinds:
+            raise SystemExit("--kinds is empty after parsing")
+        allowed_kinds = kinds
+
+    samples = iter_png_members(
+        args.samples_tar,
+        pattern=args.pattern,
+        eval_tag_override=args.eval_tag,
+        allowed_kinds=allowed_kinds,
+    )
     if args.limit is not None:
         if args.limit <= 0:
             raise SystemExit("--limit must be > 0")
@@ -437,7 +494,7 @@ def main() -> int:
                 if f is None:
                     raise RuntimeError(f"failed to extract {s.tar_member_name}")
                 data = f.read()
-                png_out = out_dir / s.tar_member_name
+                png_out = out_dir / s.relpath
                 png_out.parent.mkdir(parents=True, exist_ok=True)
                 if not png_out.exists() or png_out.stat().st_size != len(data):
                     png_out.write_bytes(data)
@@ -453,7 +510,7 @@ def main() -> int:
                 )
 
                 wav = audio_avif.reconstruct_wav(logmel, vocoder, vocoder_device)
-                wav_out = out_dir / Path(s.tar_member_name).with_suffix(".wav")
+                wav_out = out_dir / Path(s.relpath).with_suffix(".wav")
                 wav_out.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(wav_out, wav, audio_avif.TARGET_SR)
 
@@ -462,7 +519,7 @@ def main() -> int:
                     task="transcribe",
                     language=args.language,
                     fp16=(whisper_device != "cpu"),
-                    verbose=False,
+                    verbose=None,
                 )
                 hyp = (wres.get("text") or "").strip()
                 ref = labels[s.utt_id]
@@ -474,6 +531,7 @@ def main() -> int:
                     "utt_id": s.utt_id,
                     "kind": s.kind,
                     "tar_member": s.tar_member_name,
+                    "relpath": s.relpath,
                     "png_path": str(png_out),
                     "wav_path": str(wav_out),
                     "ref": ref,
