@@ -6,6 +6,7 @@ import argparse
 import html
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,8 +104,15 @@ def _fmt_float(x: float | None, nd: int = 4) -> str:
 
 
 def _relpath(from_dir: Path, to_path: Path) -> str:
+    # `Path.relative_to()` only works when both paths are either absolute or
+    # relative and `to_path` is a strict subpath. We want robust HTML-relative
+    # links even if callers pass mixed absolute/relative paths.
     try:
         return str(to_path.relative_to(from_dir))
+    except Exception:
+        pass
+    try:
+        return os.path.relpath(to_path.resolve(), from_dir.resolve())
     except Exception:
         return str(to_path)
 
@@ -500,4 +508,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
